@@ -25,6 +25,7 @@
   중단 후 이어서: 같은 명령에 --resume
 """
 import argparse
+import collections
 import csv
 import json
 import signal
@@ -37,7 +38,7 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from loveda_lib import SCENARIOS, LoveDAInpaintDataset, load_patch, resolve_init, weights_dir
+from loveda_lib import SCENARIOS, LoveDAInpaintDataset, SeededDrawSampler, load_patch, resolve_init, weights_dir
 
 
 def to_uint8(t):
@@ -75,7 +76,10 @@ def main():
     ap.add_argument("--focus", choices=["none", "building", "water"], default="none",
                     help="물체 구멍을 이 클래스 위주로 뽑음")
     ap.add_argument("--focus_weight", type=float, default=8.0)
-    ap.add_argument("--hole_probs", default="0.4,0.4,0.2", help="물체,경계띠,붓질 구멍 비율")
+    ap.add_argument("--hole_probs", default="0.4,0.4,0.2",
+                    help="물체,경계띠,붓질[,조작모양] 구멍 비율. 4번째(조작 모양)를 주면 실제 조작과 같은 모양의 구멍을 섞음")
+    ap.add_argument("--focus_weights", default=None,
+                    help="물체 구멍의 클래스별 가중치 '클래스:가중치,...' (예: '2:4,1:2' = 건물 4배, 배경 2배). --focus보다 우선")
     ap.add_argument("--require", default=None, help="이 클래스가 일정 비율 이상인 패치만 학습 (예: building)")
     ap.add_argument("--require_min", type=float, default=0.05)
     ap.add_argument("--probe", default="water_expand_small",
@@ -149,7 +153,10 @@ def main():
     # ---------------- 데이터
     focus_k = {"building": 2, "water": 4}.get(a.focus)
     hole_kwargs = dict(probs=tuple(float(x) for x in a.hole_probs.split(",")))
-    if focus_k:
+    if a.focus_weights:
+        hole_kwargs["class_weights"] = {int(k): float(v) for k, v in
+                                        (kv.split(":") for kv in a.focus_weights.split(","))}
+    elif focus_k:
         hole_kwargs["class_weights"] = {focus_k: a.focus_weight}
     ids = None
     if a.require:
@@ -157,9 +164,12 @@ def main():
             ids = sorted(r["patch_id"] for r in csv.DictReader(f)
                          if r["split"] == "train" and float(r[a.require]) >= a.require_min)
         print(f"[data] {a.require} >= {a.require_min} 인 학습 패치만 사용: {len(ids)}개")
-    train_ds = LoveDAInpaintDataset(a.patches, "train", augment=True, ids=ids, hole_kwargs=hole_kwargs)
-    loader = DataLoader(train_ds, batch_size=a.batch, shuffle=True, num_workers=a.workers,
-                        drop_last=True, pin_memory=dev.type == "cuda", persistent_workers=a.workers > 0)
+    # 같은 seed면 같은 패치 순서·회전·구멍 (full_ratio만 다른 실험은 일부 샘플만 전체 가리기로 바뀜)
+    train_ds = LoveDAInpaintDataset(a.patches, "train", augment=True, ids=ids, hole_kwargs=hole_kwargs,
+                                    seed=a.seed, full_ratio=a.full_ratio)
+    sampler = SeededDrawSampler(len(train_ds), a.seed, start_draw=step * a.batch)  # 재개하면 끊긴 지점부터
+    loader = DataLoader(train_ds, batch_size=a.batch, sampler=sampler, num_workers=a.workers,
+                        pin_memory=dev.type == "cuda", persistent_workers=a.workers > 0)
     val_all = LoveDAInpaintDataset(a.patches, "val", augment=False, fixed_holes=True, seed=12345)
     rng = np.random.default_rng(0)
     val_ids = [val_all.ids[i] for i in sorted(rng.choice(len(val_all.ids), min(a.val_n, len(val_all.ids)), replace=False))]
@@ -231,6 +241,7 @@ def main():
 
     g.train(); d.train()
     t0, it, start_step = time.time(), iter(loader), step
+    kinds = collections.Counter()
     while step < a.steps and not stop["flag"] and not (out / "STOP").exists():
         try:
             b = next(it)
@@ -239,9 +250,7 @@ def main():
         img = b["target"].to(dev, non_blocking=True)
         lab = b["mask"].to(dev, non_blocking=True)
         hole = b["hole"].to(dev, non_blocking=True)
-        if a.full_ratio > 0:
-            full = torch.rand(img.shape[0], device=dev) < a.full_ratio
-            hole[full] = (lab[full] > 0).float()[:, None]
+        kinds.update(b["kind"])  # 패치 전체 가리기는 데이터셋에서 이미 반영됨 (kind == "full")
         cond = condition(img, onehot(lab), hole)
         step += 1
 
@@ -272,7 +281,9 @@ def main():
                        l1=round(metrics["l1"].item(), 4), adv=round(metrics["adversarial"].item(), 4),
                        sem_ce=round(metrics["semantic_ce"].item(), 4),
                        sec_per_step=round(sps, 3),
-                       gpu_gib=round(torch.cuda.max_memory_allocated(dev) / 1024 ** 3, 2) if dev.type == "cuda" else "")
+                       gpu_gib=round(torch.cuda.max_memory_allocated(dev) / 1024 ** 3, 2) if dev.type == "cuda" else "",
+                       **{f"n_{k}": kinds.get(k, 0) for k in ("object", "boundary", "free", "scenario", "full", "rect")})
+            kinds.clear()  # 직전 기록 이후 구멍 종류별 개수
             append_csv(out / "train_log.csv", row)
             print(f"[train] step {step}/{a.steps}  G {row['g_loss']}  D {row['d_loss']}  L1 {row['l1']}  "
                   f"semCE {row['sem_ce']}  {sps:.2f}s/step  남은 시간 약 {(a.steps - step) * sps / 60:.0f}분", flush=True)

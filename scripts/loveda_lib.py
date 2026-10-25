@@ -390,18 +390,44 @@ def _free_form_hole(shape, rng):
     return np.array(im) > 0
 
 
+SCENARIO_HOLE_RULES = ("building_add", "building_remove")
+
+
+def _scenario_hole(mask, rng, rules=SCENARIO_HOLE_RULES):
+    """실제 조작과 같은 모양의 구멍. 원래 지도에 조작 규칙을 적용해 '구멍만' 가져오고 지도는 고치지 않는다.
+
+    - building_add 모양: 건물·도로 옆 빈 땅에 구멍 → 지도가 '빈 땅'이면 빈 땅을 그려야 함
+    - building_remove 모양: 기존 건물 위에 구멍 → 지도가 '건물'이면 건물을 그려야 함
+    둘을 같이 보여 줘야 "구멍이면 건물을 그린다"는 습관 대신 "지도대로 그린다"를 배운다.
+    """
+    order = list(rules)
+    rng.shuffle(order)
+    for name in order:
+        res = SCENARIOS[name](mask, rng=rng)
+        if res is not None:
+            return res[1]
+    return None
+
+
 def sample_train_hole(mask, rng=None, area_range=(0.03, 0.40), probs=(0.4, 0.4, 0.2), tries=12,
                       class_weights=None):
     """학습용 구멍 하나를 뽑는다. 반환: (구멍 bool 배열, 종류 이름)
+    probs: (물체, 경계 띠, 붓질[, 조작 모양]) 비율. 3개만 주면 조작 모양 = 0 (기존 동작과 같음)
     class_weights: 물체 구멍에서 클래스별 선택 가중치 (예: {2: 8.0} → 건물을 훨씬 자주 가림)"""
     rng = rng or np.random.default_rng()
-    kinds = ["object", "boundary", "free"]
+    kinds = ["object", "boundary", "free", "scenario"]
+    p = np.array(list(probs) + [0.0] * (4 - len(probs)), dtype=float)
+    if len(probs) not in (3, 4) or (p < 0).any() or p.sum() <= 0:
+        raise ValueError(f"probs는 0 이상의 값 3개 또는 4개여야 해요: {probs}")
+    p = p / p.sum()
     for _ in range(tries):
-        kind = kinds[rng.choice(3, p=probs)]
+        kind = kinds[rng.choice(4, p=p)]
         if kind == "object":
             hole = _object_hole(mask, rng, area_range, class_weights=class_weights)
         elif kind == "boundary":
             hole = _boundary_band_hole(mask, rng)
+        elif kind == "scenario":
+            hole = _scenario_hole(mask, rng)
         else:
             hole = _free_form_hole(mask.shape, rng)
         if hole is None:
@@ -462,13 +488,21 @@ class LoveDAInpaintDataset(_TorchDataset):
       pid    str       패치 ID
 
     fixed_holes=True 이면 같은 index에 항상 같은 구멍 → 검증 점수 비교용
+
+    재현 가능한 학습 (seed를 정수로 줄 때)
+      index 대신 'draw 번호' key = epoch * len + i 를 받는다 (SeededDrawSampler가 만들어 줌).
+      회전·뒤집기·구멍은 default_rng([seed, epoch, i]) 하나로 뽑아서, 같은 seed면 실행할 때마다 같은 입력을 본다.
+      패치 전체 가리기(full_ratio)는 별도 난수열 default_rng([seed, epoch, i, 1])로 정한다.
+      → full_ratio만 다른 두 실험이 같은 패치·같은 회전·같은 부분 구멍을 보고, 일부 샘플만 전체 가리기로 바뀜
+    seed=None 이면 예전처럼 매번 새 난수 (재현 안 됨)
     """
 
-    def __init__(self, root, split="train", augment=True, fixed_holes=False, seed=0,
-                 ids=None, hole_kwargs=None):
+    def __init__(self, root, split="train", augment=True, fixed_holes=False, seed=None,
+                 ids=None, hole_kwargs=None, full_ratio=0.0):
         self.root, self.split = Path(root), split
         self.augment, self.fixed_holes, self.seed = augment, fixed_holes, seed
         self.hole_kwargs = hole_kwargs or {}
+        self.full_ratio = float(full_ratio)
         self.ids = ids if ids is not None else sorted(p.stem for p in (self.root / split / "images").glob("*.png"))
         if not self.ids:
             raise FileNotFoundError(f"{self.root / split / 'images'} 에 패치가 없어요.")
@@ -476,11 +510,19 @@ class LoveDAInpaintDataset(_TorchDataset):
     def __len__(self):
         return len(self.ids)
 
-    def __getitem__(self, i):
+    def __getitem__(self, key):
         import torch
+        key = int(key)
+        n = len(self.ids)
+        i, epoch = key % n, key // n
         pid = self.ids[i]
         img, m = load_patch(self.root, self.split, pid)
-        rng = np.random.default_rng(self.seed + i) if self.fixed_holes else np.random.default_rng()
+        if self.fixed_holes:
+            rng = np.random.default_rng((self.seed or 0) + i)
+        elif self.seed is not None:
+            rng = np.random.default_rng([self.seed, epoch, i])
+        else:
+            rng = np.random.default_rng()
         if self.augment:  # 위성사진은 방향이 의미가 없어서 회전·뒤집기 사용 (사진과 마스크에 똑같이)
             k = int(rng.integers(0, 4))
             img, m = np.rot90(img, k), np.rot90(m, k)
@@ -488,6 +530,40 @@ class LoveDAInpaintDataset(_TorchDataset):
                 img, m = img[:, ::-1], m[:, ::-1]
             img, m = np.ascontiguousarray(img), np.ascontiguousarray(m)
         hole, kind = sample_train_hole(m, rng, **self.hole_kwargs)
+        if self.full_ratio > 0 and not self.fixed_holes:
+            frng = np.random.default_rng([self.seed, epoch, i, 1]) if self.seed is not None else np.random.default_rng()
+            if frng.random() < self.full_ratio:  # 패치 전체 가리기 (지도와 정답은 그대로)
+                hole, kind = m != NODATA, "full"
         x, target = make_input(img, m, hole)
         return {"input": x, "target": target, "hole": x[-1:], "mask": torch.from_numpy(m.astype(np.int64)),
                 "kind": kind, "pid": pid}
+
+
+try:
+    from torch.utils.data import Sampler as _TorchSampler
+except ImportError:
+    _TorchSampler = object
+
+
+class SeededDrawSampler(_TorchSampler):
+    """끝없이 'draw 번호'를 내는 샘플러 (LoveDAInpaintDataset의 key).
+
+    epoch e의 순서 = default_rng([seed, e]).permutation(n), 내는 값 = e * n + perm[j].
+    start_draw 만큼 건너뛰고 시작 → 재개할 때 step * batch 를 주면 끊긴 지점부터 같은 순서로 이어짐.
+    """
+
+    def __init__(self, n_items, seed, start_draw=0):
+        self.n, self.seed, self.start_draw = int(n_items), int(seed), int(start_draw)
+
+    def draw(self, d):
+        e, j = divmod(int(d), self.n)
+        return e * self.n + int(np.random.default_rng([self.seed, e]).permutation(self.n)[j])
+
+    def __iter__(self):
+        d, cache = self.start_draw, (None, None)
+        while True:
+            e, j = divmod(d, self.n)
+            if cache[0] != e:
+                cache = (e, np.random.default_rng([self.seed, e]).permutation(self.n))
+            yield e * self.n + int(cache[1][j])
+            d += 1
