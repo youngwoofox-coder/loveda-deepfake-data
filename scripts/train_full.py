@@ -29,6 +29,7 @@ import collections
 import csv
 import json
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -52,6 +53,15 @@ def append_csv(path, row):
         if new:
             w.writeheader()
         w.writerow(row)
+
+
+def git_info(path):
+    """저장소 커밋 해시와 수정 여부 (본 학습을 부탁할 때 어떤 코드로 돌렸는지 남기기 위함)"""
+    try:
+        run = lambda *c: subprocess.run(["git", "-C", str(path), *c], capture_output=True, text=True, check=True).stdout.strip()
+        return {"commit": run("rev-parse", "HEAD"), "dirty": bool(run("status", "--porcelain"))}
+    except Exception:
+        return {"commit": "", "dirty": ""}
 
 
 def probe_column(name):
@@ -149,9 +159,10 @@ def main():
         raise SystemExit(f"[error] {out} 에 이미 실험이 있어요. 이어서 하려면 --resume, 새로 하려면 다른 --out")
     if cfg_path.exists() and a.resume:
         old = json.loads(cfg_path.read_text())
-        diff = {k for k in cfg if k not in ("workers", "val_every", "save_every", "steps") and old.get(k) != cfg[k]}
+        diff = {k for k in cfg if k not in ("workers", "val_every", "save_every", "steps", "git") and old.get(k) != cfg[k]}
         if diff:
             raise SystemExit(f"[error] 설정이 이전과 달라요: {sorted(diff)}")
+    cfg["git"] = {"data_repo": git_info(Path(__file__).resolve().parents[1]), "team_repo": git_info(a.repo)}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
     # ---------------- 모델
