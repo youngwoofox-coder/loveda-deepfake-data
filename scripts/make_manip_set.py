@@ -47,7 +47,8 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--split", default="test")
     ap.add_argument("--n_per", type=int, default=1000, help="시나리오별 조작 개수")
-    ap.add_argument("--scenarios", nargs="+", default=list(SCENARIOS))
+    ap.add_argument("--scenarios", nargs="+", default=["building_remove", "building_add"],
+                    choices=list(SCENARIOS), help="기본: 건물 두 시나리오. 물 시나리오도 이름을 주면 사용 가능")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no_water_check", action="store_true", help="물 라벨 밝기 검사 끄기")
     a = ap.parse_args()

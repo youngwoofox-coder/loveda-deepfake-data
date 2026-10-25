@@ -36,6 +36,25 @@ PALETTE = np.array([
 ], dtype=np.uint8)
 
 
+# ---------------------------------------------------------------- 가중치 경로
+def weights_dir(repo, override=None):
+    """팀원 가중치 폴더. 기본은 REPO/weights, 테스트에서는 --weights_dir 로 가짜 가중치를 가리킨다."""
+    return Path(override) if override else Path(repo) / "weights"
+
+
+def resolve_init(init, repo, wdir):
+    """--init 경로 해석. 절대경로 → 그대로, 'weights/xxx.pt' 같은 상대경로 → 가중치 폴더, REPO, 현재 폴더 순으로 찾는다."""
+    p = Path(init)
+    if p.is_absolute():
+        return p
+    cands = [Path(wdir) / p.name] if p.parts and p.parts[0] == "weights" else []
+    cands += [Path(wdir) / p, Path(repo) / p, p]
+    for c in cands:
+        if c.exists():
+            return c
+    raise FileNotFoundError(f"초기 가중치를 못 찾았어요: {init} (찾아본 곳: {[str(c) for c in cands]})")
+
+
 # ---------------------------------------------------------------- 기본 연산
 def dilate(b, r):
     """반경 r 원형 팽창 (거리 변환 기반이라 r이 커도 빠름)"""

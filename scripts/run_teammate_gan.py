@@ -41,7 +41,7 @@ import torch
 from PIL import Image, ImageDraw, PngImagePlugin
 from tqdm import tqdm
 
-from loveda_lib import colorize, load_patch
+from loveda_lib import colorize, load_patch, weights_dir
 
 
 def overlay(img, hole, color=(255, 0, 255), alpha=0.5):
@@ -59,6 +59,7 @@ def main():
     ap.add_argument("--repo", type=Path, required=True, help="팀원 저장소 경로 (model.py가 있는 곳)")
     ap.add_argument("--checkpoint", type=Path, default=None, help="기본: REPO/weights/semantic_04000.pt")
     ap.add_argument("--audit", type=Path, default=None, help="기본: REPO/weights/semantic_audit.pt")
+    ap.add_argument("--weights_dir", type=Path, default=None, help="팀원 가중치 폴더 (기본: REPO/weights). 테스트용")
     ap.add_argument("--no_audit", action="store_true")
     ap.add_argument("--patches", type=Path, required=True)
     ap.add_argument("--manip", type=Path, required=True)
@@ -76,7 +77,8 @@ def main():
 
     device = torch.device("cuda" if (a.device == "auto" and torch.cuda.is_available()) else
                           ("cpu" if a.device == "auto" else a.device))
-    ckpt = a.checkpoint or a.repo / "weights" / "semantic_04000.pt"
+    wdir = weights_dir(a.repo, a.weights_dir)
+    ckpt = a.checkpoint or wdir / "semantic_04000.pt"
     state = torch.load(ckpt, map_location="cpu", weights_only=False)
     g = Generator().to(device).eval()
     g.load_state_dict(state["generator"], strict=True)
@@ -84,7 +86,7 @@ def main():
     del state
     audit = None
     if not a.no_audit:
-        audit_path = a.audit or a.repo / "weights" / "semantic_audit.pt"
+        audit_path = a.audit or wdir / "semantic_audit.pt"
         audit = segmentation(audit_path, device)
     print(f"device={device} checkpoint={ckpt} step={step} audit={'on' if audit else 'off'}")
 

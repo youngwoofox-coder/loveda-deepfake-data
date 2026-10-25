@@ -37,7 +37,7 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from loveda_lib import SCENARIOS, LoveDAInpaintDataset, load_patch
+from loveda_lib import SCENARIOS, LoveDAInpaintDataset, load_patch, resolve_init, weights_dir
 
 
 def to_uint8(t):
@@ -58,7 +58,8 @@ def main():
     ap.add_argument("--repo", type=Path, required=True)
     ap.add_argument("--patches", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--init", default="weights/semantic_04000.pt", help="'none'이면 처음부터. 상대경로는 REPO 기준")
+    ap.add_argument("--init", default="weights/semantic_04000.pt", help="'none'이면 처음부터. 상대경로는 가중치 폴더·REPO 기준")
+    ap.add_argument("--weights_dir", type=Path, default=None, help="팀원 가중치 폴더 (기본: REPO/weights). 테스트용")
     ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -104,8 +105,9 @@ def main():
 
     # ---------------- 모델
     g, d = Generator().to(dev), Discriminator().to(dev)
+    wdir = weights_dir(a.repo, a.weights_dir)
     if a.init.lower() != "none":
-        ip = Path(a.init) if Path(a.init).is_absolute() else a.repo / a.init
+        ip = resolve_init(a.init, a.repo, wdir)
         st = torch.load(ip, map_location="cpu", weights_only=False)
         g.load_state_dict(st["generator"], strict=True)
         if "discriminator" in st:
@@ -118,9 +120,9 @@ def main():
     od = torch.optim.Adam(d.parameters(), lr=a.lr, betas=(.5, .999))
     sg = torch.amp.GradScaler("cuda", enabled=amp, init_scale=128)
     sd = torch.amp.GradScaler("cuda", enabled=amp, init_scale=128)
-    teacher = segmentation(a.repo / "weights" / "semantic_teacher.pt", dev)
-    features = FrozenFeatures(a.repo / "weights" / "squeezenet_features.pt").to(dev).eval()
-    audit_path = a.repo / "weights" / "semantic_audit.pt"
+    teacher = segmentation(wdir / "semantic_teacher.pt", dev)
+    features = FrozenFeatures(wdir / "squeezenet_features.pt").to(dev).eval()
+    audit_path = wdir / "semantic_audit.pt"
     audit = segmentation(audit_path, dev) if audit_path.exists() else None
 
     step, best = 0, -1.0
