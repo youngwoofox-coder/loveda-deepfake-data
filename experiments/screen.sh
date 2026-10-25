@@ -10,7 +10,7 @@
 #   A_base      기준 (현재 ft_ourholes와 같은 구멍: 물체 40%, 경계 띠 40%, 붓질 20%)
 #   B_full20    A + 패치 전체 가리기 20%  (--full_ratio 0.2)
 #   C_scenario  구멍의 30%를 실제 조작 모양으로 (--hole_probs 0.3,0.3,0.1,0.3)
-#   D_nosem     A + 지도 없이 학습 (조건 없는 GAN 비교군, --no_sem)
+#   D_nosem     A + 지도 없이 학습 (조건 없는 GAN 비교군, --no_sem). 보고서용이라 본 학습 때 주 모델과 같이 돌림
 # 중간에 끊겨도 같은 명령을 다시 실행하면 이어서 한다 (끝난 시험은 학습을 건너뛰고 평가만 다시 함).
 set -euo pipefail
 cd "$(dirname "$0")/.."

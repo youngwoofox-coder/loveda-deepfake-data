@@ -69,6 +69,8 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--save_raw", action="store_true")
+    ap.add_argument("--no_sem", action="store_true",
+                    help="지도 채널을 0으로 생성. 체크포인트 config에 no_sem이 있으면 자동으로 켜짐 (조건 없는 GAN)")
     ap.add_argument("--n_sheets", type=int, default=12, help="시나리오별 확인 그림 수")
     a = ap.parse_args()
 
@@ -83,12 +85,13 @@ def main():
     g = Generator().to(device).eval()
     g.load_state_dict(state["generator"], strict=True)
     step = state.get("step")
+    no_sem = a.no_sem or bool((state.get("config") or {}).get("no_sem"))
     del state
     audit = None
     if not a.no_audit:
         audit_path = a.audit or wdir / "semantic_audit.pt"
         audit = segmentation(audit_path, device)
-    print(f"device={device} checkpoint={ckpt} step={step} audit={'on' if audit else 'off'}")
+    print(f"device={device} checkpoint={ckpt} step={step} audit={'on' if audit else 'off'} no_sem={no_sem}")
 
     with open(a.manip / "manifest.csv") as f:
         rows = list(csv.DictReader(f))
@@ -125,6 +128,8 @@ def main():
         with torch.no_grad():
             sem_e = onehot(torch.from_numpy(np.stack(edits).astype(np.int64)).to(device))
             sem_o = onehot(torch.from_numpy(np.stack(origs).astype(np.int64)).to(device))
+            if no_sem:  # 지도 없이 학습한 모델은 지도를 0으로 (편집 지도와 원래 지도의 결과가 같아짐)
+                sem_e, sem_o = torch.zeros_like(sem_e), torch.zeros_like(sem_o)
             raw_e = to_rgb(g(condition(img_t, sem_e, hole_t)))
             raw_o = to_rgb(g(condition(img_t, sem_o, hole_t)))
         finals, recons = [], []
@@ -169,7 +174,8 @@ def main():
                 for c, (t, p) in enumerate(panels):
                     d.text((c * 256 + 4, 4), t, fill="black")
                     canvas.paste(Image.fromarray(p), (c * 256, 24))
-                d.text((4, 266), f"{sc} / {pid} / intent={row.get('intent_changed', '-')}", fill="black")
+                d.text((4, 266), f"{sc} / {pid} / intent={row.get('intent_changed', '-')}" + (" / no_sem" if no_sem else ""),
+                       fill="black")
                 canvas.save(a.out / "sheets" / f"{sc}_{sheet_count[sc]:02d}.png")
                 sheet_count[sc] += 1
 
@@ -187,7 +193,7 @@ def main():
             v = [r[k] for r in rs if k in r]
             if v:
                 summary[sc][k] = round(float(np.mean(v)), 4)
-    summary["_meta"] = dict(checkpoint=str(ckpt), step=step, audit=bool(audit),
+    summary["_meta"] = dict(checkpoint=str(ckpt), step=step, audit=bool(audit), no_sem=no_sem,
                             note="intent_changed는 분할기 기준 보조 지표. 자연스러움은 그림과 KID로 따로 판단.")
     (a.out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 

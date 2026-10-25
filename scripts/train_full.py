@@ -3,6 +3,7 @@
 
 팀원 train.py와 같은 것
   - Generator / Discriminator 구조, generator_loss (L1·경계·적대·특징매칭·지각·질감·그래디언트·의미 CE)
+    (손실은 scripts/losses_local.py 의 복사본을 씀. --no_sem 이 아니면 팀원 함수와 수치적으로 같음)
   - 판별기 손실, Adam(betas .5,.999), 기울기 자르기 10, AMP 초기 scale 128
   - 체크포인트 형식 {'generator','discriminator',...,'step'} → run_teammate_gan.py, 팀원 evaluate.py 모두 사용 가능
 다른 것
@@ -141,11 +142,15 @@ def main():
     ap.add_argument("--probe_manip", type=Path, default=None,
                     help="make_manip_set.py --split val 로 만든 고정 조작 세트. 주면 즉석 생성 대신 이것을 사용 (권장)")
     ap.add_argument("--probe_n", type=int, default=64, help="검증 조작 개수 (시나리오별)")
+    ap.add_argument("--no_sem", action="store_true",
+                    help="지도 없이 학습 (조건 없는 GAN 비교군). 생성기·판별기의 지도 입력과 의미 CE 손실을 끔")
     a = ap.parse_args()
+    use_sem = not a.no_sem
 
     sys.path.insert(0, str(a.repo.resolve()))
-    from model import (Discriminator, FrozenFeatures, Generator, condition, generator_loss,  # 팀원 코드
-                       normalize, onehot, region_mean, segmentation)
+    from losses_local import generator_loss_local, semantic_input  # 팀원 손실의 복사본 (+ 지도 없이 학습 옵션)
+    from model import (Discriminator, FrozenFeatures, Generator, condition,  # 팀원 코드
+                       normalize, region_mean, segmentation)
 
     torch.manual_seed(a.seed); np.random.seed(a.seed)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -251,7 +256,7 @@ def main():
         vl = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=min(4, a.workers))
         for b in vl:
             img = b["target"].to(dev); lab = b["mask"].to(dev); hole = b["hole"].to(dev)
-            raw = g(condition(img, onehot(lab), hole))
+            raw = g(condition(img, semantic_input(lab, use_sem), hole))
             fake = img * (1 - hole) + raw * hole
             h = hole[:, 0] > 0
             l1s.append(((fake - img).abs().mean(1) * 127.5)[h].mean().item())
@@ -271,7 +276,7 @@ def main():
                     img = torch.from_numpy(np.stack([c[0] for c in chunk])).permute(0, 3, 1, 2).float().to(dev) / 127.5 - 1
                     ed = torch.from_numpy(np.stack([c[2] for c in chunk]).astype(np.int64)).to(dev)
                     hole = torch.from_numpy(np.stack([c[3] for c in chunk]).astype(np.float32))[:, None].to(dev)
-                    raw = g(condition(img, onehot(ed), hole))
+                    raw = g(condition(img, semantic_input(ed, use_sem), hole))
                     fake = img * (1 - hole) + raw * hole
                     pred = audit(normalize(fake))["out"].argmax(1) + 1
                     for j, c in enumerate(chunk):
@@ -308,7 +313,7 @@ def main():
         lab = b["mask"].to(dev, non_blocking=True)
         hole = b["hole"].to(dev, non_blocking=True)
         kinds.update(b["kind"])  # 패치 전체 가리기는 데이터셋에서 이미 반영됨 (kind == "full")
-        cond = condition(img, onehot(lab), hole)
+        cond = condition(img, semantic_input(lab, use_sem), hole)
         step += 1
 
         d.requires_grad_(True); od.zero_grad(set_to_none=True)
@@ -325,7 +330,7 @@ def main():
 
         d.requires_grad_(False); og.zero_grad(set_to_none=True)
         with torch.autocast(dev.type, dtype=torch.float16, enabled=amp):
-            gl, metrics = generator_loss(g, d, teacher, features, img, lab, hole, step)
+            gl, metrics = generator_loss_local(g, d, teacher, features, img, lab, hole, step, use_sem=use_sem)
         if not torch.isfinite(gl):
             raise FloatingPointError(f"step {step}: 생성기 손실이 발산")
         sg.scale(gl).backward(); sg.unscale_(og); torch.nn.utils.clip_grad_norm_(g.parameters(), 10)
