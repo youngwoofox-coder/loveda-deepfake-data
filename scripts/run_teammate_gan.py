@@ -11,17 +11,10 @@
   images/{시나리오}/{patch_id}.png   최종 조작 사진 (PNG, SYNTHETIC 표시)
   raw/{시나리오}/{patch_id}.png      (--save_raw) 합성 전 생성기 출력 전체
   sheets/{시나리오}_{번호}.png        확인용 그림: 원본 | 편집 지도 | 구멍 | 결과 | 원래지도 복원
-  results.csv                        사례별 지표
-  summary.json                       시나리오별 평균
+  results.csv, results_components.csv, summary.json   채점 결과 (score_results.py 와 같은 채점)
 
-지표 (분할 모델 = 팀원의 semantic_audit.pt)
-  intent_changed   바뀐 픽셀 중 결과 사진에서 '목표 클래스'로 인식된 비율  ← 의도 반영
-  gone_changed     바뀐 픽셀 중 결과 사진에서 '원래 클래스가 아니게' 인식된 비율 ← 건물 삭제에서 핵심
-                   (건물 삭제는 채움 클래스가 배경/농경지 등으로 다양해서, '건물이 사라졌나'가 더 공정한 기준)
-  real_target      같은 픽셀이 원본 사진에서 이미 목표 클래스로 인식된 비율 (비교 기준, 낮아야 정상)
-  real_label_agree 같은 픽셀에서 원본 사진 인식이 원래 라벨과 맞는 비율 (분할기 신뢰도 참고)
-  recon_mae        원래 지도로 생성했을 때 구멍 안의 원본과의 평균 오차(0~255)  ← 복원 능력
-  outside_max_err  구멍 밖 최대 변화량. 항상 0이어야 함
+지표는 score_results.py 설명 참고 (intent_changed, gone_changed, add_precision_M, overgen_C, keep_buildings ...)
+여기서만 계산하는 것: recon_mae = 원래 지도로 생성했을 때 구멍 안의 원본과의 평균 오차(0~255) ← 복원 능력
 
 사용법:
   python run_teammate_gan.py --repo ../loveda-semantic-editing \
@@ -42,6 +35,7 @@ from PIL import Image, ImageDraw, PngImagePlugin
 from tqdm import tqdm
 
 from loveda_lib import colorize, load_patch, weights_dir
+from score_results import make_predict, print_summary, score
 
 
 def overlay(img, hole, color=(255, 0, 255), alpha=0.5):
@@ -108,12 +102,7 @@ def main():
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "sheets").mkdir(exist_ok=True)
 
-    results, sheet_count = [], defaultdict(int)
-
-    @torch.no_grad()
-    def predict(rgb_uint8):
-        x = torch.from_numpy(rgb_uint8).permute(0, 3, 1, 2).float().to(device) / 127.5 - 1
-        return audit(normalize(x))["out"].argmax(1).cpu().numpy() + 1  # 클래스 1~7
+    recon, sheet_count = {}, defaultdict(int)
 
     for s in tqdm(range(0, len(rows), a.batch), desc="generate"):
         batch = rows[s:s + a.batch]
@@ -137,13 +126,10 @@ def main():
             f_ = imgs[i].copy(); f_[holes[i]] = raw_e[i][holes[i]]
             o_ = imgs[i].copy(); o_[holes[i]] = raw_o[i][holes[i]]
             finals.append(f_); recons.append(o_)
-        pred_f = predict(np.stack(finals)) if audit else None
-        pred_r = predict(np.stack(imgs)) if audit else None
 
         for i, r in enumerate(batch):
             sc, pid = r["scenario"], r["patch_id"]
             img, m, e, h, fin = imgs[i], origs[i], edits[i], holes[i], finals[i]
-            changed = (m != e) & (e != 0)
             outside = int(np.abs(fin.astype(np.int16) - img.astype(np.int16))[~h].max()) if (~h).any() else 0
             if outside:
                 raise AssertionError(f"{pid}: 구멍 밖이 바뀜")
@@ -151,20 +137,14 @@ def main():
             folder.mkdir(parents=True, exist_ok=True)
             info = PngImagePlugin.PngInfo()
             info.add_text("SYNTHETIC", "true")
-            info.add_text("configuration", json.dumps(dict(scenario=sc, patch_id=pid, checkpoint=str(ckpt.name), step=step)))
+            info.add_text("generator", "gan_no_sem" if no_sem else "gan")
+            info.add_text("configuration", json.dumps(dict(scenario=sc, patch_id=pid, checkpoint=str(ckpt.name), step=step,
+                                                           no_sem=no_sem)))
             Image.fromarray(fin).save(folder / f"{pid}.png", pnginfo=info)
             if a.save_raw:
                 (a.out / "raw" / sc).mkdir(parents=True, exist_ok=True)
                 Image.fromarray(raw_e[i]).save(a.out / "raw" / sc / f"{pid}.png", pnginfo=info)
-            row = dict(scenario=sc, patch_id=pid, domain=r["domain"], hole_ratio=r["hole_ratio"],
-                       changed_px=int(changed.sum()), outside_max_err=outside,
-                       recon_mae=round(float(np.abs(recons[i].astype(float) - img.astype(float))[h].mean()), 3))
-            if audit is not None and changed.any():
-                row["intent_changed"] = round(float((pred_f[i][changed] == e[changed]).mean()), 4)
-                row["gone_changed"] = round(float((pred_f[i][changed] != m[changed]).mean()), 4)
-                row["real_target"] = round(float((pred_r[i][changed] == e[changed]).mean()), 4)
-                row["real_label_agree"] = round(float((pred_r[i][changed] == m[changed]).mean()), 4)
-            results.append(row)
+            recon[(sc, pid)] = {"recon_mae": round(float(np.abs(recons[i].astype(float) - img.astype(float))[h].mean()), 3)}
 
             if sheet_count[sc] < a.n_sheets:
                 panels = [("real", img), ("edited map", colorize(e)), ("hole = GT", overlay(img, h)),
@@ -174,36 +154,15 @@ def main():
                 for c, (t, p) in enumerate(panels):
                     d.text((c * 256 + 4, 4), t, fill="black")
                     canvas.paste(Image.fromarray(p), (c * 256, 24))
-                d.text((4, 266), f"{sc} / {pid} / intent={row.get('intent_changed', '-')}" + (" / no_sem" if no_sem else ""),
-                       fill="black")
+                d.text((4, 266), f"{sc} / {pid}" + (" / no_sem" if no_sem else ""), fill="black")
                 canvas.save(a.out / "sheets" / f"{sc}_{sheet_count[sc]:02d}.png")
                 sheet_count[sc] += 1
 
-    keys = list(dict.fromkeys(k for r in results for k in r))
-    with open(a.out / "results.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=keys)
-        w.writeheader()
-        w.writerows(results)
-
-    summary = {}
-    for sc in sorted({r["scenario"] for r in results}):
-        rs = [r for r in results if r["scenario"] == sc]
-        summary[sc] = {"n": len(rs), "recon_mae": round(float(np.mean([r["recon_mae"] for r in rs])), 3)}
-        for k in ["intent_changed", "gone_changed", "real_target", "real_label_agree"]:
-            v = [r[k] for r in rs if k in r]
-            if v:
-                summary[sc][k] = round(float(np.mean(v)), 4)
-    summary["_meta"] = dict(checkpoint=str(ckpt), step=step, audit=bool(audit), no_sem=no_sem,
-                            note="intent_changed는 분할기 기준 보조 지표. 자연스러움은 그림과 KID로 따로 판단.")
-    (a.out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    print("\n시나리오별 평균")
-    print(f"{'scenario':20s} {'n':>5s} {'intent':>8s} {'gone':>7s} {'real_tgt':>9s} {'real_ok':>8s} {'recon':>7s}")
-    for sc, v in summary.items():
-        if sc.startswith("_"):
-            continue
-        print(f"{sc:20s} {v['n']:5d} {v.get('intent_changed', float('nan')):8.3f} {v.get('gone_changed', float('nan')):7.3f} "
-              f"{v.get('real_target', float('nan')):9.3f} {v.get('real_label_agree', float('nan')):8.3f} {v['recon_mae']:7.2f}")
+    # 채점은 score_results.py 와 같은 함수 (복사-붙여넣기 등 다른 방법과 똑같이 채점하기 위함)
+    del g
+    summary = score(a.out, a.manip, a.patches, make_predict(audit, device) if audit else None, extra=recon,
+                    meta=dict(checkpoint=str(ckpt), step=step, no_sem=no_sem, generator="gan"), batch=a.batch, rows=rows)
+    print_summary(summary)
     print("저장:", a.out)
 
 
