@@ -54,6 +54,50 @@ def append_csv(path, row):
         w.writerow(row)
 
 
+def probe_column(name):
+    """검증 점수 열 이름. 생성(추가·확장)은 목표 클래스로 보이는 비율, 삭제는 원래 클래스가 사라진 비율"""
+    return {"building_add": "add_intent", "building_remove": "remove_gone"}.get(
+        name, f"{name}_gone" if name.endswith("_remove") else f"{name}_intent")
+
+
+def load_probes(patches, names, manip=None, n=64, val_ids=None):
+    """시나리오별 검증 조작 [(사진, 원래 지도, 편집 지도, 구멍), ...]
+
+    manip 폴더(make_manip_set.py --split val 결과)를 주면 그 manifest 순서대로 앞에서 n개.
+    없으면 val 패치에 규칙을 즉석 적용 (패치 순서·seed 고정이라 매번 같음).
+    """
+    probes = {}
+    if manip is not None:
+        with open(Path(manip) / "manifest.csv") as f:
+            rows = list(csv.DictReader(f))
+        bad = {r["split"] for r in rows} - {"val"}
+        if bad:
+            raise SystemExit(f"[error] 검증 조작 세트는 val 분할이어야 해요 (지금: {sorted(bad)}). "
+                             f"make_manip_set.py --split val 로 만드세요. test는 학습·모델 선택에 쓰지 않습니다.")
+        for name in names:
+            lst = []
+            for r in [r for r in rows if r["scenario"] == name][:n]:
+                img, m = load_patch(patches, "val", r["patch_id"])
+                e = np.array(Image.open(Path(manip) / name / "edited_masks" / f"{r['patch_id']}.png"))
+                h = np.array(Image.open(Path(manip) / name / "holes" / f"{r['patch_id']}.png")) > 0
+                lst.append((img, m, e, h))
+            if not lst:
+                raise SystemExit(f"[error] {manip} 에 '{name}' 조작이 없어요")
+            probes[name] = lst
+        return probes
+    for name in names:
+        rule, lst = SCENARIOS[name], []
+        for pid in val_ids:
+            if len(lst) >= n:
+                break
+            img, m = load_patch(patches, "val", pid)
+            res = rule(m, rng=np.random.default_rng(len(lst)))
+            if res is not None:
+                lst.append((img, m, res[0], res[1]))
+        probes[name] = lst
+    return probes
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", type=Path, required=True)
@@ -82,8 +126,11 @@ def main():
                     help="물체 구멍의 클래스별 가중치 '클래스:가중치,...' (예: '2:4,1:2' = 건물 4배, 배경 2배). --focus보다 우선")
     ap.add_argument("--require", default=None, help="이 클래스가 일정 비율 이상인 패치만 학습 (예: building)")
     ap.add_argument("--require_min", type=float, default=0.05)
-    ap.add_argument("--probe", default="water_expand_small",
-                    help="검증 때 실제로 해 볼 조작 (water_expand_small / building_add / building_remove ...)")
+    ap.add_argument("--probe", nargs="+", default=["building_add", "building_remove"],
+                    help="검증 때 실제로 해 볼 조작들. best.pt는 이들 점수의 평균(edit_score)으로 고름")
+    ap.add_argument("--probe_manip", type=Path, default=None,
+                    help="make_manip_set.py --split val 로 만든 고정 조작 세트. 주면 즉석 생성 대신 이것을 사용 (권장)")
+    ap.add_argument("--probe_n", type=int, default=64, help="검증 조작 개수 (시나리오별)")
     a = ap.parse_args()
 
     sys.path.insert(0, str(a.repo.resolve()))
@@ -174,17 +221,10 @@ def main():
     rng = np.random.default_rng(0)
     val_ids = [val_all.ids[i] for i in sorted(rng.choice(len(val_all.ids), min(a.val_n, len(val_all.ids)), replace=False))]
     val_ds = LoveDAInpaintDataset(a.patches, "val", augment=False, fixed_holes=True, seed=12345, ids=val_ids)
-    # 실제 조작 검증용: val 패치에 --probe 규칙 적용, 고정
-    probe, rule = [], SCENARIOS[a.probe]
-    for pid in val_all.ids:
-        if len(probe) >= 64:
-            break
-        img, m = load_patch(a.patches, "val", pid)
-        res = rule(m, rng=np.random.default_rng(len(probe)))
-        if res is not None:
-            probe.append((img, m, res[0], res[1]))
-    removal = a.probe.endswith("_remove")  # 삭제는 '원래 클래스가 사라졌나'로 판정
-    print(f"train {len(train_ds)}개 패치, val {len(val_ds)}개, 조작 검증 {len(probe)}개, device={dev}, amp={amp}")
+    # 실제 조작 검증용 (시나리오별 고정). test 분할은 쓰지 않는다
+    probes = load_probes(a.patches, a.probe, a.probe_manip, a.probe_n, val_all.ids)
+    print(f"train {len(train_ds)}개 패치, val {len(val_ds)}개, 조작 검증 "
+          f"{ {k: len(v) for k, v in probes.items()} }, device={dev}, amp={amp}")
 
     stop = {"flag": False}
     for sgn in (signal.SIGINT, signal.SIGTERM):
@@ -210,31 +250,37 @@ def main():
                 agree.append((pred[valid] == lab[valid]).float().mean().item())
             if sample is None:
                 sample = (to_uint8(img[:6] * (1 - hole[:6])), to_uint8(fake[:6]), to_uint8(img[:6]))
-        intent = float("nan")
-        if probe and audit is not None:
-            hits = []
-            for i in range(0, len(probe), 16):
-                chunk = probe[i:i + 16]
-                img = torch.from_numpy(np.stack([c[0] for c in chunk])).permute(0, 3, 1, 2).float().to(dev) / 127.5 - 1
-                ed = torch.from_numpy(np.stack([c[2] for c in chunk]).astype(np.int64)).to(dev)
-                hole = torch.from_numpy(np.stack([c[3] for c in chunk]).astype(np.float32))[:, None].to(dev)
-                raw = g(condition(img, onehot(ed), hole))
-                fake = img * (1 - hole) + raw * hole
-                pred = audit(normalize(fake))["out"].argmax(1) + 1
-                for j, c in enumerate(chunk):
-                    ch = torch.from_numpy((c[1] != c[2]) & (c[2] != 0)).to(dev)
-                    if ch.any():
-                        orig = torch.from_numpy(c[1].astype(np.int64)).to(dev)
-                        ok = (pred[j][ch] != orig[ch]) if removal else (pred[j][ch] == ed[j][ch])
-                        hits.append(ok.float().mean().item())
-            intent = float(np.mean(hits)) if hits else float("nan")
+        scores = {}
+        if audit is not None:
+            for name, probe in probes.items():
+                removal = name.endswith("_remove")  # 삭제는 '원래 클래스가 사라졌나'로 판정
+                hits = []
+                for i in range(0, len(probe), 16):
+                    chunk = probe[i:i + 16]
+                    img = torch.from_numpy(np.stack([c[0] for c in chunk])).permute(0, 3, 1, 2).float().to(dev) / 127.5 - 1
+                    ed = torch.from_numpy(np.stack([c[2] for c in chunk]).astype(np.int64)).to(dev)
+                    hole = torch.from_numpy(np.stack([c[3] for c in chunk]).astype(np.float32))[:, None].to(dev)
+                    raw = g(condition(img, onehot(ed), hole))
+                    fake = img * (1 - hole) + raw * hole
+                    pred = audit(normalize(fake))["out"].argmax(1) + 1
+                    for j, c in enumerate(chunk):
+                        ch = torch.from_numpy((c[1] != c[2]) & (c[2] != 0)).to(dev)
+                        if ch.any():
+                            orig = torch.from_numpy(c[1].astype(np.int64)).to(dev)
+                            ok = (pred[j][ch] != orig[ch]) if removal else (pred[j][ch] == ed[j][ch])
+                            hits.append(ok.float().mean().item())
+                if hits:
+                    scores[probe_column(name)] = round(float(np.mean(hits)), 4)
         g.train()
         if sample is not None:
             rows = [np.concatenate(list(col), axis=0) for col in sample]
             Image.fromarray(np.concatenate(rows, axis=1)).save(out / "samples" / f"step_{step:06d}.png")
-        return dict(step=step, val_hole_l1=round(float(np.mean(l1s)), 3),
-                    val_sem_agree=round(float(np.mean(agree)), 4) if agree else "",
-                    edit_intent=round(intent, 4) if intent == intent else "")
+        row = dict(step=step, val_hole_l1=round(float(np.mean(l1s)), 3),
+                   val_sem_agree=round(float(np.mean(agree)), 4) if agree else "")
+        for name in probes:  # 열 순서를 항상 같게
+            row[probe_column(name)] = scores.get(probe_column(name), "")
+        row["edit_score"] = round(float(np.mean(list(scores.values()))), 4) if scores else ""
+        return row
 
     if step == 0:
         v = validate(); append_csv(out / "val_log.csv", v); print("[val]", v)
@@ -292,10 +338,10 @@ def main():
         if step % a.val_every == 0 or step == a.steps:
             v = validate(); append_csv(out / "val_log.csv", v); print("[val]", v, flush=True)
             save(out / "checkpoints" / f"step_{step:06d}.pt", full=False)
-            if isinstance(v["edit_intent"], float) and v["edit_intent"] > best:
-                best = v["edit_intent"]
+            if isinstance(v["edit_score"], float) and v["edit_score"] > best:
+                best = v["edit_score"]
                 save(out / "checkpoints" / "best.pt", full=False)
-                print(f"[best] step {step} 조작 의도 반영률 {best}", flush=True)
+                print(f"[best] step {step} edit_score {best}", flush=True)
             save(latest)
     save(latest)
     print("STOPPED_SAFELY" if step < a.steps else "TRAINING_COMPLETE", "step", step, flush=True)
