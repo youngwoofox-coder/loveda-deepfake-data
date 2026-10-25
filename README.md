@@ -100,7 +100,12 @@ grep "=====" logs/pipeline.log                                        # 진행 �
 | `demo_rules.py` | 패치 | `outputs/rules_*.png` (원본 → 원본 지도 → 편집 지도 → 구멍 → 모델 입력) |
 | `train_full.py` | 패치 + 팀원 저장소 | `runs/{이름}/checkpoints/*.pt`, 검증 기록, 샘플 그림 |
 | `run_teammate_gan.py` | 체크포인트 + 패치 + 조작 세트 | `results/{이름}/images`, `sheets`, `results.csv`, `summary.json` |
-| `loveda_lib.py` | (공용) | 조작 규칙, 학습 구멍, Dataset, 입력 생성 |
+| `score_results.py` | 결과 사진 + 조작 세트 | 채점만 (`results.csv`, `results_components.csv`, `summary.json`). 생성 방법과 무관 |
+| `baseline_copy_paste.py` | 패치 + 조작 세트 | 복사-붙여넣기 베이스라인 결과와 채점 |
+| `losses_local.py` | (공용) | 팀원 `generator_loss` 복사본 + 지도 없이 학습 옵션 |
+| `loveda_lib.py` | (공용) | 조작 규칙, 학습 구멍, Dataset, 입력 생성, `SeededDrawSampler` |
+| `experiments/screen.sh` | 패치 + val 조작 세트 | 짧은 학습 시험 여러 개를 같은 조건으로 학습·평가 → 비교표 |
+| `experiments/compare.py` | `runs/`, `results_val/` | 시험 비교표 (마크다운) |
 
 ### train_full.py와 재환님 train.py의 차이
 모델 구조·손실·옵티마이저·AMP 설정은 재환님 코드를 그대로 import 합니다. 다른 점은 데이터뿐입니다.
@@ -111,7 +116,42 @@ grep "=====" logs/pipeline.log                                        # 진행 �
 
 주요 옵션: `--steps`, `--batch`, `--init`, `--full_ratio`(패치 전체 가리기 비율), `--focus building|water`, `--require building`, `--probe`, `--resume`
 
-## 8. 평가 지표 (`run_teammate_gan.py`)
+#### 추가된 옵션 (exp/building-holes)
+
+| 옵션 | 기본값 | 뜻 |
+|---|---|---|
+| `--seed` | 0 | 패치 순서·회전·구멍을 정함. 같은 seed면 같은 입력, `--full_ratio`만 다른 실험은 일부 샘플만 전체 가리기로 바뀜 |
+| `--hole_probs` | `0.4,0.4,0.2` | 4번째 값 = 실제 조작 모양 구멍(건물 옆 빈 땅 / 건물 위). 원래 지도 그대로라 "지도대로 그리기"를 학습 |
+| `--focus_weights` | 없음 | 물체 구멍의 클래스별 가중치, 예: `2:4,1:2` (건물 4배, 배경 2배). `--focus`보다 우선 |
+| `--probe` | `building_add building_remove` | 검증 때 해 볼 조작들. `best.pt`는 점수 평균 `edit_score`로 선택 |
+| `--probe_manip` | 없음 | `make_manip_set.py --split val` 결과. 주면 고정 조작 세트로 검증 (권장). test 세트는 거부 |
+| `--probe_n` | 64 | 시나리오별 검증 조작 수 |
+| `--no_sem` | 꺼짐 | 지도 없이 학습 (조건 없는 GAN 비교군): 지도 입력과 의미 CE 손실을 끔 |
+| `--weights_dir` | `REPO/weights` | 팀원 가중치 폴더 (테스트용) |
+
+`config.json`에 두 저장소의 git 커밋과 수정 여부가 기록됩니다. `train_log.csv`에 구멍 종류별 개수(`n_object` …)가 남습니다.
+
+#### 짧은 시험 (학습 방식 고르기)
+
+```bash
+python scripts/make_manip_set.py --patches data/LoveDA_patches --out data/LoveDA_manip_val --split val --n_per 300
+STEPS=3000 BATCH=8 NO_AMP=1 nohup bash experiments/screen.sh > logs/screen.log 2>&1 &   # 1060: NO_AMP=1 필수
+python experiments/compare.py
+```
+시험: `A_base`(기준), `B_full20`(전체 가리기 20%), `C_scenario`(조작 모양 구멍 30%), `D_nosem`(조건 없는 GAN). `EXPS="A_base C_scenario"`처럼 골라서 실행.
+
+#### 테스트
+
+```bash
+python -m pytest -q tests      # 가짜 데이터·무작위 가중치, CPU 약 2분. 실제 LoveDA·GPU 불필요
+```
+
+## 8. 평가 지표 (`run_teammate_gan.py`, `score_results.py`)
+
+영역: E = 편집 지도가 바뀐 픽셀, M = 구멍(다시 그린 곳 = 정답), C = M − E (다시 그렸지만 의미는 그대로여야 함), O = 구멍 밖.
+아래 기존 지표에 더해 `add_precision_M`·`add_iou_M`·`overgen_C`(건물 추가), `remove_residual`·`fill_match`·`keep_buildings`(건물 삭제),
+`c_sem_keep`·`c_rgb_mae`(주변 보존), 원본 기준선 `real_*`, 건물 크기 구간별(20px 미만 / 20~50 / 50 이상)·도메인별 평균을 계산합니다.
+정의는 `scripts/score_results.py` 맨 위 설명에 있습니다.
 
 채점은 재환님의 별도 분할 모델(`semantic_audit.pt`, 학습 손실용 teacher와 다른 가중치)로 합니다.
 

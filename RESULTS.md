@@ -52,6 +52,10 @@
 - best 선택 기준을 생성 intent와 삭제 gone의 평균으로
 
 ## 5. 아직 안 한 것
-- 물 시나리오(확장 small/large, 축소) 조작 세트 평가
-- 사실성 지표 (KID), 경계 정합도, 사람 평가
+- 위 2절 결과는 test 조작 세트로 모델을 비교·선택한 것이라 **개발 결과**로 취급. 이후 선택은 val 조작 세트(`--probe_manip`, `experiments/screen.sh`)로 하고 test는 마지막에 한 번만
+- 짧은 시험(A_base / B_full20 / C_scenario) → 확정 설정 + 조건 없는 GAN(`--no_sem`) 2만 step 본 학습
+- 복사-붙여넣기 베이스라인(`baseline_copy_paste.py`) test 평가
+- 사실성 지표 (KID), 사람 평가
+- 진짜/가짜를 원본(1024) 단위로 분리 (지금은 같은 원본의 이웃 패치가 조작 세트와 `real_pool.csv`에 나뉘어 들어감)
 - 기말: 기성 탐지기(TruFor 등) 통과율, `real_pool.csv` 기반 진짜/가짜 탐지 데이터 구성
+- (보류) 물 시나리오 — 팀 결정으로 건물 추가·삭제만 진행
