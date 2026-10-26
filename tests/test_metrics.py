@@ -44,3 +44,20 @@ def test_outside_change_detected():
 
 def test_size_bins():
     assert size_bin(399) == "small" and size_bin(400) == "mid" and size_bin(2499) == "mid" and size_bin(2500) == "large"
+
+
+def test_sharpness_blur_lowers_ratio():
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(0)
+    orig = np.ones((64, 64), np.uint8)
+    orig[40:60, 40:60] = 2                                    # 진짜 건물 (구멍 밖, 기준)
+    edited = orig.copy(); edited[5:25, 5:25] = 2              # 새 건물 (E)
+    hole = np.zeros_like(orig, bool); hole[2:28, 2:28] = True
+    tex = rng.integers(0, 255, (64, 64, 1)).repeat(3, 2).astype(np.uint8)   # 거친 질감
+    img = np.full((64, 64, 3), 120, np.uint8); img[40:60, 40:60] = tex[40:60, 40:60]
+    sharp = img.copy(); sharp[5:25, 5:25] = tex[5:25, 5:25]   # 진짜 건물만큼 거친 새 건물
+    blur = img.copy(); blur[5:25, 5:25] = ndi.gaussian_filter(tex[5:25, 5:25].astype(float), (2, 2, 0)).astype(np.uint8)
+    rs, _ = case_metrics("building_add", orig, edited, hole, sharp, img, None, None)
+    rb, _ = case_metrics("building_add", orig, edited, hole, blur, img, None, None)
+    assert rs["sharp_ref"] != "" and rs["sharp_ratio"] > 0.5
+    assert rb["sharp_ratio"] < 0.5 * rs["sharp_ratio"]

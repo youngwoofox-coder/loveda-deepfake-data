@@ -28,6 +28,14 @@
                      outside_max_err O에서 최대 차이. 0이 아니면 합성 오류로 중단
   real_* 이 붙은 지표는 같은 계산을 원본 사진 예측으로 한 기준선
 
+선명도 (팀원 제안: 라플라시안 분산). 회색조 사진에 라플라시안 필터를 걸고 영역 안 값의 분산을 본다. 흐릴수록 작다.
+  sharp_E          결과 사진의 E 영역 라플라시안 분산
+  real_sharp_E     원본 사진의 같은 영역 (조작 전. 건물 추가면 원래 밭·빈 땅의 선명도)
+  sharp_ref        같은 원본 사진에서 구멍 밖의, 목표 클래스(추가 = 건물, 삭제 = 채움 클래스) 진짜 픽셀의 분산
+  sharp_ratio      sharp_E / sharp_ref. 1에 가까우면 같은 사진의 진짜 지물만큼 선명, 1보다 많이 작으면 흐림
+  주의: 노이즈·격자 무늬 같은 생성 잡음도 분산을 키우므로, 값이 높다고 무조건 좋은 것은 아니다. 그림과 같이 볼 것.
+  요약에는 평균과 함께 중앙값(_median)도 넣는다 (작은 영역은 값이 크게 튀기 때문)
+
 크기 구간: E의 연결 요소마다 side = sqrt(면적)으로 small(20px 미만) / mid(20~50) / large(50 이상).
   요소별 add_recall 또는 remove_residual 을 results_components.csv에, 구간별 평균을 summary.json에 저장
 
@@ -56,7 +64,25 @@ SUMMARY_KEYS = ["intent_changed", "gone_changed", "real_target", "real_label_agr
                 "remove_residual", "fill_match", "keep_buildings",
                 "c_sem_keep", "c_rgb_mae",
                 "real_add_precision_M", "real_overgen_C", "real_keep_buildings", "real_c_sem_keep",
-                "recon_mae"]
+                "recon_mae", "sharp_E", "real_sharp_E", "sharp_ref", "sharp_ratio"]
+MEDIAN_KEYS = ["sharp_E", "real_sharp_E", "sharp_ref", "sharp_ratio"]
+CARRY_KEYS = ("recon_mae", "donor_coverage")  # 다시 채점할 때 이전 results.csv에서 가져올 값 (생성 쪽에서만 알 수 있음)
+
+
+def lap_var(lap, region, min_px=16):
+    return round(float(lap[region].var()), 2) if int(region.sum()) >= min_px else ""
+
+
+def sharpness(final, img, orig, edited, hole, E):
+    """라플라시안 분산 기반 선명도 (위 설명 참고)"""
+    lap_f = ndi.laplace(final.astype(np.float32).mean(axis=2))
+    lap_r = ndi.laplace(img.astype(np.float32).mean(axis=2))
+    targets = np.unique(edited[E]) if E.any() else []
+    ref = ~hole & np.isin(orig, targets) & (orig != NODATA)
+    out = {"sharp_E": lap_var(lap_f, E), "real_sharp_E": lap_var(lap_r, E), "sharp_ref": lap_var(lap_r, ref, 64)}
+    out["sharp_ratio"] = (round(out["sharp_E"] / out["sharp_ref"], 4)
+                          if out["sharp_E"] != "" and out["sharp_ref"] not in ("", 0, 0.0) else "")
+    return out
 
 
 def frac(num_mask, den_mask):
@@ -77,7 +103,8 @@ def case_metrics(scenario, orig, edited, hole, final, img, pred, pred_r):
     O = ~hole
     outside = int(np.abs(final.astype(np.int16) - img.astype(np.int16))[O].max()) if O.any() else 0
     row = {"changed_px": int(E.sum()), "outside_max_err": outside,
-           "c_rgb_mae": round(float(np.abs(final.astype(float) - img.astype(float))[C].mean()), 3) if C.any() else ""}
+           "c_rgb_mae": round(float(np.abs(final.astype(float) - img.astype(float))[C].mean()), 3) if C.any() else "",
+           **sharpness(final, img, orig, edited, hole, E)}
     comps = []
     if pred is None:
         return row, comps
@@ -120,6 +147,8 @@ def mean_of(rows, keys):
         v = [float(r[k]) for r in rows if r.get(k, "") != ""]
         if v:
             out[k] = round(float(np.mean(v)), 4)
+            if k in MEDIAN_KEYS:
+                out[k + "_median"] = round(float(np.median(v)), 4)
     return out
 
 
@@ -177,6 +206,10 @@ def score(results_dir, manip, patches, predict=None, extra=None, meta=None, batc
             rows = [r for r in csv.DictReader(f) if (results_dir / "images" / r["scenario"] / f"{r['patch_id']}.png").exists()]
     if not rows:
         raise SystemExit(f"[error] {results_dir / 'images'} 에 채점할 결과가 없어요")
+    if extra is None and (results_dir / "results.csv").exists():  # 다시 채점: 생성 쪽 값(recon_mae 등)은 이전 결과에서
+        with open(results_dir / "results.csv") as f:
+            extra = {(r["scenario"], r["patch_id"]): {k: float(r[k]) for k in CARRY_KEYS if r.get(k, "") != ""}
+                     for r in csv.DictReader(f)}
     extra = extra or {}
     results, components = [], []
     it = range(0, len(rows), batch)
@@ -212,13 +245,14 @@ def score(results_dir, manip, patches, predict=None, extra=None, meta=None, batc
 def print_summary(summary):
     print("\n시나리오별 평균")
     print(f"{'scenario':16s} {'n':>5s} {'intent':>7s} {'gone':>6s} {'prec_M':>7s} {'overgen':>8s} "
-          f"{'keepB':>6s} {'real_tgt':>9s} {'recon':>7s}")
+          f"{'keepB':>6s} {'real_tgt':>9s} {'recon':>7s} {'sharp':>6s}")
     for sc, v in summary.items():
         if sc.startswith("_"):
             continue
         g = lambda k, d=3: f"{v[k]:.{d}f}" if k in v else "-"
         print(f"{sc:16s} {v['n']:5d} {g('intent_changed'):>7s} {g('gone_changed'):>6s} {g('add_precision_M'):>7s} "
-              f"{g('overgen_C'):>8s} {g('keep_buildings'):>6s} {g('real_target'):>9s} {g('recon_mae', 2):>7s}")
+              f"{g('overgen_C'):>8s} {g('keep_buildings'):>6s} {g('real_target'):>9s} {g('recon_mae', 2):>7s} "
+              f"{g('sharp_ratio_median', 2):>6s}")
 
 
 def main():
@@ -239,7 +273,10 @@ def main():
     predict = None
     if not a.no_audit:
         predict = make_predict(load_audit(a.repo, weights_dir(a.repo, a.weights_dir), a.audit, device), device)
-    summary = score(a.results, a.manip, a.patches, predict, batch=a.batch, meta=dict(source=str(a.results)))
+    old = a.results / "summary.json"
+    meta = json.loads(old.read_text()).get("_meta", {}) if old.exists() else {}
+    meta.pop("note", None)
+    summary = score(a.results, a.manip, a.patches, predict, batch=a.batch, meta=dict(meta, rescored_from=str(a.results)))
     print_summary(summary)
     print("저장:", a.results)
 

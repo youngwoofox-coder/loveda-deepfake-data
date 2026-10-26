@@ -55,6 +55,7 @@ def collect(run_dir, res_dir):
         "remove_gone": r_gone, "keep_bld": num(rem.get("keep_buildings")),
         "edit_score": (a_int + r_gone) / 2 if a_int is not None and r_gone is not None else None,
         "recon_add": num(add.get("recon_mae")), "recon_rem": num(rem.get("recon_mae")),
+        "sharp_add": num(add.get("sharp_ratio_median")), "sharp_rem": num(rem.get("sharp_ratio_median")),
         "sec_per_step": num(train[-1]["sec_per_step"]) if train else None,
         "n": (add.get("n"), rem.get("n")),
         "git": (cfg.get("git", {}).get("data_repo", {}) or {}).get("commit", "")[:7],
@@ -92,17 +93,20 @@ def main():
 
     print(f"## 짧은 시험 비교 (val 조작 세트, prefix={a.prefix})\n")
     print("| 시험 | 바꾼 설정 | best step | edit_score ↑ | 추가 intent ↑ | 추가 precision ↑ | 과잉 생성 ↓ "
-          "| 삭제 gone ↑ | 주변 건물 유지 ↑ | 복원 오차 추가/삭제 ↓ | 초/step | 탈락 |")
-    print("|" + "---|" * 12)
+          "| 삭제 gone ↑ | 주변 건물 유지 ↑ | 복원 오차 추가/삭제 ↓ | 선명도 추가/삭제 (1=진짜만큼) | 초/step | 탈락 |")
+    print("|" + "---|" * 13)
     for n in sorted(names, key=lambda k: -(rows[k]["edit_score"] or -1)):
         r = rows[n]
         print(f"| {n} | {r['setting']} | {r['best_step']} | {fmt(r['edit_score'])} | {fmt(r['add_intent'])} "
               f"| {fmt(r['add_precision'])} | {fmt(r['overgen'])} | {fmt(r['remove_gone'])} | {fmt(r['keep_bld'])} "
-              f"| {fmt(r['recon_add'], 2)} / {fmt(r['recon_rem'], 2)} | {fmt(r['sec_per_step'], 2)} | {flags(r, base)} |")
+              f"| {fmt(r['recon_add'], 2)} / {fmt(r['recon_rem'], 2)} | {fmt(r['sharp_add'], 2)} / {fmt(r['sharp_rem'], 2)} "
+              f"| {fmt(r['sec_per_step'], 2)} | {flags(r, base)} |")
     any_r = next(iter(rows.values()))
     print(f"\n공통: steps={any_r['steps']}, batch={any_r['batch']}, seed={any_r['seed']}, "
           f"평가 조작 수(추가, 삭제)={any_r['n']}, 코드 커밋={any_r['git'] or '-'}")
     print("edit_score 차이가 0.02 미만이면 차이 없음으로 보고 더 단순한 설정(A_base)을 고른다.")
+    print("선명도 = 편집 영역의 라플라시안 분산 ÷ 같은 사진 진짜 지물(추가: 건물, 삭제: 채움 클래스)의 분산, 중앙값. "
+          "1보다 많이 작으면 흐림. 생성 잡음도 값을 키우므로 그림과 같이 볼 것.")
 
 
 if __name__ == "__main__":
