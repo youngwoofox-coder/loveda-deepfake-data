@@ -76,7 +76,9 @@ def main():
     wdir = weights_dir(a.repo, a.weights_dir)
     ckpt = a.checkpoint or wdir / "semantic_04000.pt"
     state = torch.load(ckpt, map_location="cpu", weights_only=False)
-    g = Generator().to(device).eval()
+    from model_local import build_generator, generator_kind  # 생성기 변형 (체크포인트 config에 기록된 구조로)
+    gen_kind = generator_kind(state)
+    g = build_generator(gen_kind).to(device).eval()
     g.load_state_dict(state["generator"], strict=True)
     step = state.get("step")
     no_sem = a.no_sem or bool((state.get("config") or {}).get("no_sem"))
@@ -85,7 +87,8 @@ def main():
     if not a.no_audit:
         audit_path = a.audit or wdir / "semantic_audit.pt"
         audit = segmentation(audit_path, device)
-    print(f"device={device} checkpoint={ckpt} step={step} audit={'on' if audit else 'off'} no_sem={no_sem}")
+    print(f"device={device} checkpoint={ckpt} step={step} audit={'on' if audit else 'off'} no_sem={no_sem} "
+          f"generator={gen_kind}")
 
     with open(a.manip / "manifest.csv") as f:
         rows = list(csv.DictReader(f))
@@ -161,7 +164,7 @@ def main():
     # 채점은 score_results.py 와 같은 함수 (복사-붙여넣기 등 다른 방법과 똑같이 채점하기 위함)
     del g
     summary = score(a.out, a.manip, a.patches, make_predict(audit, device) if audit else None, extra=recon,
-                    meta=dict(checkpoint=str(ckpt), step=step, no_sem=no_sem, generator="gan"), batch=a.batch, rows=rows)
+                    meta=dict(checkpoint=str(ckpt), step=step, no_sem=no_sem, generator="gan", generator_arch=gen_kind), batch=a.batch, rows=rows)
     print_summary(summary)
     print("저장:", a.out)
 

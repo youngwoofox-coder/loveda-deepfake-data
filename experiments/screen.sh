@@ -13,6 +13,8 @@
 #   E_ce0       A + 의미 CE 끔 (--ce_weight 0): 흐려짐이 '분할기 맞추기' 손실 때문인지
 #   E_ce1       A + 의미 CE 3 → 1 (--ce_weight 1)
 #   F_sharp     A + L1 50 → 20, 적대 2 → 5: 흐려짐이 평균화(L1) 때문인지
+#   G_resize    A + 생성기의 키우는 층을 Upsample+Conv3x3으로 (격자 결함 대책, 디코더는 새로 학습)
+#   G_resize_ce0  G_resize + 의미 CE 끔
 #   D_nosem     A + 지도 없이 학습 (조건 없는 GAN 비교군, --no_sem). 보고서용이라 본 학습 때 주 모델과 같이 돌림
 # 중간에 끊겨도 같은 명령을 다시 실행하면 이어서 한다 (끝난 시험은 학습을 건너뛰고 평가만 다시 함).
 set -euo pipefail
@@ -47,7 +49,9 @@ exp_args(){
     E_ce0)      echo "--ce_weight 0" ;;
     E_ce1)      echo "--ce_weight 1" ;;
     F_sharp)    echo "--l1_weight 20 --adv_weight 5" ;;
-    *) echo "[error] 모르는 시험 이름: $1 (A_base B_full20 C_scenario D_nosem E_ce0 E_ce1 F_sharp)" >&2; exit 1 ;;
+    G_resize)   echo "--generator resize" ;;
+    G_resize_ce0) echo "--generator resize --ce_weight 0" ;;
+    *) echo "[error] 모르는 시험 이름: $1 (A_base B_full20 C_scenario D_nosem E_ce0 E_ce1 F_sharp G_resize G_resize_ce0)" >&2; exit 1 ;;
   esac
 }
 

@@ -144,6 +144,9 @@ def main():
     ap.add_argument("--probe_n", type=int, default=64, help="검증 조작 개수 (시나리오별)")
     ap.add_argument("--no_sem", action="store_true",
                     help="지도 없이 학습 (조건 없는 GAN 비교군). 생성기·판별기의 지도 입력과 의미 CE 손실을 끔")
+    ap.add_argument("--generator", choices=["convT", "resize"], default="convT",
+                    help="생성기 구조. convT = 팀원 구조 그대로, resize = 키우는 층을 Upsample+Conv3x3으로 (격자 결함 대책). "
+                         "resize는 인코더·지도 주입만 --init에서 가져오고 디코더는 새로 학습")
     ap.add_argument("--l1_weight", type=float, default=50.0, help="L1 복원 손실 가중치 (팀원 기본 50). 낮추면 덜 흐려질 수 있음")
     ap.add_argument("--adv_weight", type=float, default=2.0, help="적대 손실 가중치 (팀원 기본 2). 높이면 더 또렷할 수 있음")
     ap.add_argument("--ce_weight", type=float, default=3.0,
@@ -176,12 +179,18 @@ def main():
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
     # ---------------- 모델
-    g, d = Generator().to(dev), Discriminator().to(dev)
+    from model_local import build_generator, load_matching  # 생성기 변형 (팀원 model.py는 그대로)
+    g, d = build_generator(a.generator).to(dev), Discriminator().to(dev)
     wdir = weights_dir(a.repo, a.weights_dir)
     if a.init.lower() != "none":
         ip = resolve_init(a.init, a.repo, wdir)
         st = torch.load(ip, map_location="cpu", weights_only=False)
-        g.load_state_dict(st["generator"], strict=True)
+        if a.generator == "convT":
+            g.load_state_dict(st["generator"], strict=True)
+        else:  # 이름·크기가 같은 텐서(인코더, 지도 주입)만 이어받고 디코더는 새로
+            took, fresh = load_matching(g, st["generator"])
+            print(f"[init] 생성기 {a.generator}: 이어받은 텐서 {len(took)}개, 새로 학습 {len(fresh)}개 "
+                  f"({sorted({k.split('.')[0] for k in fresh})})")
         if "discriminator" in st:
             d.load_state_dict(st["discriminator"], strict=True)
         del st
