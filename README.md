@@ -128,6 +128,9 @@ grep "=====" logs/pipeline.log                                        # 진행 �
 | `--probe_n` | 64 | 시나리오별 검증 조작 수 |
 | `--no_sem` | 꺼짐 | 지도 없이 학습 (조건 없는 GAN 비교군): 지도 입력과 의미 CE 손실을 끔 |
 | `--weights_dir` | `REPO/weights` | 팀원 가중치 폴더 (테스트용) |
+| `--ce_weight` | 3 | 의미 CE 손실 가중치 (0이면 분할 교사를 안 돌림). 끄면 건물을 거의 안 그림 → 유지 |
+| `--l1_weight`, `--adv_weight` | 50, 2 | 복원 L1, 적대 손실 가중치 |
+| `--generator` | `convT` | `resize` = 디코더의 ConvTranspose를 Upsample(nearest)+Conv3×3으로 바꾼 생성기(`scripts/model_local.py`, 격자 결함 대책). 인코더·지도 주입은 `--init`에서 이어받고 디코더는 새로 학습. 평가 스크립트는 체크포인트에 기록된 구조를 자동으로 씀 |
 
 `config.json`에 두 저장소의 git 커밋과 수정 여부가 기록됩니다. `train_log.csv`에 구멍 종류별 개수(`n_object` …)가 남습니다.
 
@@ -138,7 +141,34 @@ python scripts/make_manip_set.py --patches data/LoveDA_patches --out data/LoveDA
 STEPS=3000 BATCH=8 NO_AMP=1 nohup bash experiments/screen.sh > logs/screen.log 2>&1 &   # 1060: NO_AMP=1 필수
 python experiments/compare.py
 ```
-시험: `A_base`(기준), `B_full20`(전체 가리기 20%), `C_scenario`(조작 모양 구멍 30%), `D_nosem`(조건 없는 GAN). `EXPS="A_base C_scenario"`처럼 골라서 실행.
+시험: `A_base`(기준), `B_full20`(전체 가리기 20%), `C_scenario`(조작 모양 구멍 30%), `D_nosem`(조건 없는 GAN),
+`E_ce0`·`E_ce1`(의미 CE 0·1), `F_sharp`(L1 20, 적대 5), `G_resize`·`G_resize_ce0`(resize 생성기). `EXPS="A_base C_scenario"`처럼 골라서 실행.
+환경 변수: `STEPS`, `BATCH`, `NO_AMP`, `VAL_EVERY`, `PROBE_N`(검증 조작 수, 기본 200), `PREFIX`(결과 폴더 앞이름). 끊겨도 같은 명령으로 이어서 함.
+
+#### 본 학습 (2만 step)
+
+```bash
+EXPS="A_base G_resize D_nosem" STEPS=20000 BATCH=16 VAL_EVERY=1000 PROBE_N=300 PREFIX=full nohup bash experiments/screen.sh > logs/full.log 2>&1 &
+```
+결과: `runs/full_*`(체크포인트, 로그), `results_val/full_*`(val 조작 세트 평가), `results_val/full_compare.md`(비교표).
+
+#### 비교 그림 (이름 가린 사람 비교)
+
+```bash
+python scripts/make_review_sheets.py --manip data/LoveDA_manip_val --patches data/LoveDA_patches --out review/full --n 10 \
+  --results start=results_val/start A=results_val/full_A_base G=results_val/full_G_resize N=results_val/full_D_nosem
+```
+사례마다 result 1~5 순서가 섞여 있음. 판정 후 `key.csv`로 모델 확인, `review.csv`에 판정 기록.
+시작 모델 결과(`results_val/start`)가 없으면: `python scripts/run_teammate_gan.py --repo ../loveda-semantic-editing --patches data/LoveDA_patches --manip data/LoveDA_manip_val --out results_val/start`
+
+#### 최종 평가 (test, 모델 확정 후 한 번만)
+
+```bash
+python scripts/make_manip_set.py --patches data/LoveDA_patches --out data/LoveDA_manip_test --split test --n_per 1000
+python scripts/run_teammate_gan.py --repo ../loveda-semantic-editing --checkpoint runs/full_<확정>/checkpoints/best.pt \
+  --patches data/LoveDA_patches --manip data/LoveDA_manip_test --out results_test/<확정>
+# 비교군도 같은 방식: full_D_nosem, 시작 모델(--checkpoint 생략), 복사-붙여넣기(scripts/baseline_copy_paste.py)
+```
 
 #### 테스트
 
@@ -152,6 +182,8 @@ python -m pytest -q tests      # 가짜 데이터·무작위 가중치, CPU 약 
 아래 기존 지표에 더해 `add_precision_M`·`add_iou_M`·`overgen_C`(건물 추가), `remove_residual`·`fill_match`·`keep_buildings`(건물 삭제),
 `c_sem_keep`·`c_rgb_mae`(주변 보존), 원본 기준선 `real_*`, 건물 크기 구간별(20px 미만 / 20~50 / 50 이상)·도메인별 평균을 계산합니다.
 정의는 `scripts/score_results.py` 맨 위 설명에 있습니다.
+선명도 `sharp_ratio`: 편집 영역의 라플라시안 분산 ÷ 같은 사진의 진짜 지물(추가: 건물, 삭제: 채움 클래스) 분산, 중앙값. 1보다 많이 작으면 흐림.
+단, 격자 잡음도 값을 키우므로 그림과 같이 볼 것.
 
 채점은 재환님의 별도 분할 모델(`semantic_audit.pt`, 학습 손실용 teacher와 다른 가중치)로 합니다.
 
