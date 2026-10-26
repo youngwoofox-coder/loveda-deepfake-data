@@ -19,7 +19,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {"full_ratio": 0.0, "hole_probs": "0.4,0.4,0.2", "focus": "none", "focus_weights": None,
-            "require": None, "no_sem": False, "init": "weights/semantic_04000.pt", "lr": 0.0001}
+            "require": None, "no_sem": False, "init": "weights/semantic_04000.pt", "lr": 0.0001,
+            "l1_weight": 50.0, "adv_weight": 2.0, "ce_weight": 3.0}
 
 
 def read_csv(p):

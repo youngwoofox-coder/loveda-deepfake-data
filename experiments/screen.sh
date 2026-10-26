@@ -10,6 +10,9 @@
 #   A_base      기준 (현재 ft_ourholes와 같은 구멍: 물체 40%, 경계 띠 40%, 붓질 20%)
 #   B_full20    A + 패치 전체 가리기 20%  (--full_ratio 0.2)
 #   C_scenario  구멍의 30%를 실제 조작 모양으로 (--hole_probs 0.3,0.3,0.1,0.3)
+#   E_ce0       A + 의미 CE 끔 (--ce_weight 0): 흐려짐이 '분할기 맞추기' 손실 때문인지
+#   E_ce1       A + 의미 CE 3 → 1 (--ce_weight 1)
+#   F_sharp     A + L1 50 → 20, 적대 2 → 5: 흐려짐이 평균화(L1) 때문인지
 #   D_nosem     A + 지도 없이 학습 (조건 없는 GAN 비교군, --no_sem). 보고서용이라 본 학습 때 주 모델과 같이 돌림
 # 중간에 끊겨도 같은 명령을 다시 실행하면 이어서 한다 (끝난 시험은 학습을 건너뛰고 평가만 다시 함).
 set -euo pipefail
@@ -41,7 +44,10 @@ exp_args(){
     B_full20)   echo "--full_ratio 0.2" ;;
     C_scenario) echo "--hole_probs 0.3,0.3,0.1,0.3" ;;
     D_nosem)    echo "--no_sem" ;;
-    *) echo "[error] 모르는 시험 이름: $1 (A_base B_full20 C_scenario D_nosem)" >&2; exit 1 ;;
+    E_ce0)      echo "--ce_weight 0" ;;
+    E_ce1)      echo "--ce_weight 1" ;;
+    F_sharp)    echo "--l1_weight 20 --adv_weight 5" ;;
+    *) echo "[error] 모르는 시험 이름: $1 (A_base B_full20 C_scenario D_nosem E_ce0 E_ce1 F_sharp)" >&2; exit 1 ;;
   esac
 }
 

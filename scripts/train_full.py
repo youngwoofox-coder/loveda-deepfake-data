@@ -144,8 +144,13 @@ def main():
     ap.add_argument("--probe_n", type=int, default=64, help="검증 조작 개수 (시나리오별)")
     ap.add_argument("--no_sem", action="store_true",
                     help="지도 없이 학습 (조건 없는 GAN 비교군). 생성기·판별기의 지도 입력과 의미 CE 손실을 끔")
+    ap.add_argument("--l1_weight", type=float, default=50.0, help="L1 복원 손실 가중치 (팀원 기본 50). 낮추면 덜 흐려질 수 있음")
+    ap.add_argument("--adv_weight", type=float, default=2.0, help="적대 손실 가중치 (팀원 기본 2). 높이면 더 또렷할 수 있음")
+    ap.add_argument("--ce_weight", type=float, default=3.0,
+                    help="의미 CE(분할 교사가 목표 클래스로 보게 하는 손실) 가중치 (팀원 기본 3). 0이면 끔")
     a = ap.parse_args()
     use_sem = not a.no_sem
+    loss_weights = dict(l1=a.l1_weight, adv=a.adv_weight, ce=a.ce_weight)
 
     sys.path.insert(0, str(a.repo.resolve()))
     from losses_local import generator_loss_local, semantic_input  # 팀원 손실의 복사본 (+ 지도 없이 학습 옵션)
@@ -330,7 +335,8 @@ def main():
 
         d.requires_grad_(False); og.zero_grad(set_to_none=True)
         with torch.autocast(dev.type, dtype=torch.float16, enabled=amp):
-            gl, metrics = generator_loss_local(g, d, teacher, features, img, lab, hole, step, use_sem=use_sem)
+            gl, metrics = generator_loss_local(g, d, teacher, features, img, lab, hole, step, use_sem=use_sem,
+                                               weights=loss_weights)
         if not torch.isfinite(gl):
             raise FloatingPointError(f"step {step}: 생성기 손실이 발산")
         sg.scale(gl).backward(); sg.unscale_(og); torch.nn.utils.clip_grad_norm_(g.parameters(), 10)

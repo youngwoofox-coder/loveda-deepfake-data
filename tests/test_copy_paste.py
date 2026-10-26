@@ -29,3 +29,19 @@ def test_copy_paste_only_changes_E_and_is_deterministic(fake_patches, fake_weigh
         assert np.array_equal(a[~E], img[~E])
         assert not np.array_equal(a[E], img[E])
     assert (outs[0] / "summary.json").exists()
+
+
+def test_review_sheets(fake_patches, tmp_path):
+    from PIL import Image as _I
+    manip = tmp_path / "manip"
+    run_script("make_manip_set.py", "--patches", fake_patches, "--out", manip, "--n_per", 3)
+    for k in range(2):
+        run_script("baseline_copy_paste.py", "--patches", fake_patches, "--manip", manip, "--out", tmp_path / f"cp{k}",
+                   "--seed", k)
+    out = tmp_path / "review"
+    run_script("make_review_sheets.py", "--results", f"a={tmp_path / 'cp0'}", f"b={tmp_path / 'cp1'}",
+               "--manip", manip, "--patches", fake_patches, "--out", out, "--n", 2)
+    key = list(csv.DictReader(open(out / "key.csv", encoding="utf-8-sig")))
+    assert key and {key[0]["result_1"], key[0]["result_2"]} == {"a", "b"}
+    assert len(list((out / "sheets").glob("*.png"))) == len(key)
+    assert _I.open(next((out / "sheets").glob("*.png"))).size[0] == 256 * 4

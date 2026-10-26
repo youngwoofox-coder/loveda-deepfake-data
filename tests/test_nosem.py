@@ -58,3 +58,21 @@ def test_nosem_train_resume_and_map_blind(fake_patches, fake_weights, team_repo,
         a = g(condition(img, semantic_input(lab, False), hole))
         b = g(condition(img, semantic_input(edited, False), hole))
     assert torch.equal(a, b)
+
+
+def test_loss_weight_options(fake_patches, fake_weights):
+    from losses_local import generator_loss_local
+    from model import Discriminator, FrozenFeatures, Generator, segmentation
+    torch.manual_seed(0)
+    g, d = Generator().eval(), Discriminator().eval()
+    teacher = segmentation(fake_weights / "semantic_teacher.pt", torch.device("cpu"))
+    features = FrozenFeatures(fake_weights / "squeezenet_features.pt").eval()
+    img, lab, hole = _inputs(fake_patches)
+    with torch.no_grad():
+        base, m = generator_loss_local(g, d, teacher, features, img, lab, hole, 600)
+        no_ce, m0 = generator_loss_local(g, d, teacher, features, img, lab, hole, 600, weights=dict(ce=0))
+        sharp, _ = generator_loss_local(g, d, teacher, features, img, lab, hole, 600, weights=dict(l1=20, adv=5))
+    assert float(m0["semantic_ce"]) == 0.0
+    assert torch.allclose(no_ce, base - 3 * m["semantic_ce"], atol=1e-4)
+    expect = base - 30 * m["l1"] + 3 * m["adversarial"]
+    assert torch.allclose(sharp, expect, atol=1e-4)

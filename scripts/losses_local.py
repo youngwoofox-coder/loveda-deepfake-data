@@ -5,7 +5,11 @@
 use_sem=False 일 때만 두 가지를 바꾼다.
   1) 생성기·판별기 입력의 지도 7채널을 0으로 (지도를 못 봄)
   2) 의미 CE 항(분할 교사가 목표 클래스로 인식하게 만드는 손실)을 0으로. 이 항도 라벨 정보를 쓰기 때문
-use_sem=True 일 때는 model.generator_loss 와 수치적으로 같다 (tests/test_nosem.py 에서 확인).
+use_sem=True, 가중치 기본값일 때는 model.generator_loss 와 수치적으로 같다 (tests/test_nosem.py 에서 확인).
+
+손실 가중치(weights)도 바꿀 수 있다 (흐려짐 원인 시험용). 기본값 = 팀원 값
+  l1 50, boundary 10, adv 2, fm 3, perceptual 2, texture 0.5, gradient 5, ce 3
+  ce = 0 이면 분할 교사(teacher)를 아예 돌리지 않는다 (의미 CE 끔)
 
 주의: no-data(0) 픽셀을 손실에서 빼는 'valid' 마스크는 그대로 둔다. 학습 신호를 어디서 계산할지의 문제일 뿐
 생성기 입력으로 들어가는 정보가 아니기 때문.
@@ -22,7 +26,12 @@ def semantic_input(label, use_sem=True):
     return s if use_sem else torch.zeros_like(s)
 
 
-def generator_loss_local(g, d, teacher, features, image, label, mask, iteration, use_sem=True):
+DEFAULT_WEIGHTS = dict(l1=50.0, boundary=10.0, adv=2.0, fm=3.0, perceptual=2.0, texture=0.5, gradient=5.0, ce=3.0)
+
+
+def generator_loss_local(g, d, teacher, features, image, label, mask, iteration, use_sem=True, weights=None):
+    w = dict(DEFAULT_WEIGHTS, **(weights or {}))
+    use_ce = use_sem and w["ce"] > 0
     semantic = semantic_input(label, use_sem); cond = condition(image, semantic, mask)
     raw = g(cond); fake = image * (1 - mask) + raw * mask
     valid = (label != 0)[:, None].float(); support = mask * valid
@@ -33,14 +42,14 @@ def generator_loss_local(g, d, teacher, features, image, label, mask, iteration,
     boundary = region_mean((raw.float() - image).abs(), ring)
     with torch.no_grad():
         _, dr = discriminator_features(d, torch.cat([cond, image], 1)); real_features = features(image)
-        if use_sem:
+        if use_ce:
             probabilities = teacher(normalize(image))['out'].float().softmax(1)
             confidence, prediction = probabilities.max(1)
     fm = sum(region_mean((a.float() - b.float()).abs(), support) for a, b in zip(df, dr)) / len(df)
     perceptual, texture = feature_losses(features(fake), real_features, support)
     gradient = sum(region_mean((torch.diff(fake.float(), dim=axis) - torch.diff(image, dim=axis)).abs(),
                                support[:, :, :, 1:] if axis == -1 else support[:, :, 1:, :]) for axis in [-1, -2]) / 2
-    if use_sem:
+    if use_ce:
         target = label.long() - 1; target = target.masked_fill(label == 0, 255)
         allowed = (prediction == target) & (confidence >= .5) & (label >= 2) & (mask[:, 0] > 0)
         logits = teacher(normalize(fake))['out'].float()
@@ -49,8 +58,8 @@ def generator_loss_local(g, d, teacher, features, image, label, mask, iteration,
     else:
         allowed = torch.zeros_like(label, dtype=torch.bool)
         ce = l1 * 0
-    loss = 50 * l1 + 10 * boundary + 2 * adv + 3 * fm + 2 * perceptual + .5 * texture + 5 * gradient \
-        + 3 * min(1., iteration / 500) * ce
+    loss = w["l1"] * l1 + w["boundary"] * boundary + w["adv"] * adv + w["fm"] * fm + w["perceptual"] * perceptual \
+        + w["texture"] * texture + w["gradient"] * gradient + w["ce"] * min(1., iteration / 500) * ce
     return loss, dict(l1=l1, boundary=boundary, adversarial=adv, feature_matching=fm, perceptual=perceptual,
                       texture=texture, gradient=gradient, semantic_ce=ce,
                       semantic_supervised_fraction=allowed.sum() / support.sum().clamp_min(1),
